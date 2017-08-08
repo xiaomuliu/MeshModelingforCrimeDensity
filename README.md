@@ -2,8 +2,6 @@
 
 Application of content-adaptive mesh modeling to crime spatial density estimation problems.
 
-Reference: J. G. Brankov, Y. Yang, and M. N. Wernick, “Tomographic Image Reconstruction Based on a Content-Adaptive Mesh Model,” IEEE Trans. Med. Imaging, vol. 23, no. 2, pp. 202–212, 2004
-
 1.Using mesh grid model to represent crime density
 
 Assumed "true" density map
@@ -20,3 +18,5 @@ Using observed incidents to estimate density (comparing mesh, equivalent-sized p
 
 Reconstructed density
 ![alt text](https://github.com/xiaomuliu/MeshModelingforCrimeDensity/blob/master/Recon_MAP10-3_node834.jpeg)
+
+Reference: J. G. Brankov, Y. Yang, and M. N. Wernick, “Tomographic Image Reconstruction Based on a Content-Adaptive Mesh Model,” IEEE Trans. Med. Imaging, vol. 23, no. 2, pp. 202–212, 2004
