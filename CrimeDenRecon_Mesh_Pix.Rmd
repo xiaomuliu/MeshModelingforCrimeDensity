@@ -1,0 +1,170 @@
+---
+title: "Crime Density Reconstruction"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load-crime-data,echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+setwd("/Users/xiaomuliu/CrimeProject/SpatioTemporalModeling/MeshModeling/")
+
+PredTarget <- "ViolentCrime"
+source("SetupCrimeData.R")
+```
+
+```{r set-eval-grid,echo=FALSE, message=FALSE, warning=FALSE,include=FALSE, cache=TRUE}
+source("SetupGrid.R")
+```
+
+```{r load-func,echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+source("IMfunction.R")
+source("MeshGenFunction.R")
+source("MeshReconFunction.R")
+source("PixGenFunction.R")
+source("PixReconFunction.R")
+source("MeshEvalFunction.R")
+```
+
+Assume a density estimated by KDE (symmetric bivariate Gaussain with bandwidth=660ft for both directions) using all violent crime during 2001-2010 to be the "true" density and the observed violent crime incidents during 2011-2012 to be a realization of this density.
+```{r trueDen-obs,echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+startDate.pix <- as.Date("2001-01-01")
+endDate.pix <- as.Date("2010-12-31")
+CrimeHistPts <- subset(CrimeData,DATEOCC>=startDate.pix & DATEOCC<=endDate.pix,select=c("X_COORD","Y_COORD","INC_CNT"))
+
+startDate.obs <- as.Date("2011-01-01")
+endDate.obs <- as.Date("2012-12-31")
+CrimeObsPts <- subset(CrimeData,DATEOCC>=startDate.obs & DATEOCC<=endDate.obs,select=c("X_COORD","Y_COORD","INC_CNT"))
+
+CrimeObsPts.raster <- rasterize(CrimeObsPts[,c("X_COORD","Y_COORD")], r, CrimeObsPts$INC_CNT, fun=sum)
+# Used for mesh reconstruction (only needs grids inside the city area)
+CrimeObsPts.df_inCity <- as.data.frame(CrimeObsPts.raster,xy=TRUE)[isInCity,]
+names(CrimeObsPts.df_inCity) <- c("X_COORD","Y_COORD","INC_CNT")
+CrimeObsPts.df_inCity$INC_CNT[is.na(CrimeObsPts.df_inCity$INC_CNT)] <- 0
+CrimeObsPts.df_inCity <- CrimeObsPts.df_inCity[ord,]
+# Used for pixel reconstruction (needs grids of rectangular area)
+CrimeObsPts.df_full<- as.data.frame(CrimeObsPts.raster,xy=TRUE)
+names(CrimeObsPts.df_full) <- c("X_COORD","Y_COORD","INC_CNT")
+CrimeObsPts.df_full$INC_CNT[is.na(CrimeObsPts.df_full$INC_CNT)] <- 0
+CrimeObsPts.df_full <- CrimeObsPts.df_full[ord.full,]
+```
+
+The expected number of mesh nodes/pixels for testing:  
+200  400  600  800 1000 1200 1400 1600 1800 2000 2500 3000 3500 4000
+We assign 10% of the mesh nodes on the city boundary to constrain mesh grids inside the city area.  
+The smoothing parameter (of Gibbs prior):  
+0.0005 0.0010 0.0015
+
+We use peak signal-to-noise ratio (PSNR) and representation error (RMSE%) for assessment.
+NOTE: When EM alogrithm is used for MAP estimation, during the iteration, negative estimated values may produced, which violates Poisson assumption and yield nonsense results. We exclude those points from showing.
+```{r test-spec,echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+# Extract City Boundary 
+isInCity2_mat <- matrix(isInCity2,nrow=r@ncols,ncol=r@nrows)
+Bndy_mat <- DetectEdge(isInCity2_mat)
+isOnBndy <- as.vector(Bndy_mat)  
+
+h <- grd.full@grid@cellsize  # kernel bandwidth for KDE
+EnodeSet <- c(seq(200,2000,by=200),seq(2500,4000,by=500)) # expected number of nodes
+# EpixSet <- EnodeSet # expected number of pixels
+bndyPercent <- 0.1 # the percent of nodes on boundary
+SmParamSet <- seq(0.0005,0.0015,by=0.0005) # Gibbs prior parameter
+iterMax <- 30 # maximal EM iterations
+reltol <- 1e-8 # relevance tolerance for convergence
+eps <- 1e-20
+
+NumNode <- rep(0,length(EnodeSet))
+# peak SNR and representation error (RMSE%)
+Mesh.ML_PSNR <- rep(0,length(EnodeSet))
+Mesh.ML_repErr <- rep(0,length(EnodeSet))
+Mesh.MAP_PSNR <- matrix(0,nrow=length(EnodeSet),ncol=length(SmParamSet))
+Mesh.MAP_repErr <- matrix(0,nrow=length(EnodeSet),ncol=length(SmParamSet))
+Pix.ML_PSNR <- rep(0,length(EnodeSet))
+Pix.ML_repErr <- rep(0,length(EnodeSet))
+Pix.MAP_PSNR <- matrix(0,nrow=length(EnodeSet),ncol=length(SmParamSet))
+Pix.MAP_repErr <- matrix(0,nrow=length(EnodeSet),ncol=length(SmParamSet))
+```
+
+```{r gen-trun-den,echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+DenIm <- generateDenIm(CrimeHistPts,r,KDEgrd.full,bw=h)
+
+KDE.Hist_full <- KDEgrd.full[,c("X_COORD","Y_COORD")]
+KDE.Hist_full$VALUE <- as.vector(DenIm)
+KDE.Hist_inCity <- KDE.Hist_full[isInCity2,]  
+KDE.Hist_inCity$DENVAL <- KDE.Hist_inCity$VALUE/sum(KDE.Hist_inCity$VALUE) 
+```
+
+```{r test,echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+for (i in 1:length(EnodeSet)){
+  ENode <- EnodeSet[i] 
+  BndyNode <- round(bndyPercent*ENode)
+  
+  ## generate constrained Mesh
+  meshList <- generateConstraintMesh2(CrimeHistPts,r,KDEgrd.full,ENode,isOnBndy,BndyNode,bw=h,plot=FALSE)
+  MeshNode_raw <- meshList$meshNode
+  MeshTri <- meshList$Tri
+  
+  ## generate pixel-based grid
+  PixList <- generatePixGrd(ENode,RegGrd,r)
+  PixGrd <- PixList$grd
+  PixRaster <- PixList$raster
+
+  ## ML
+  # Mesh
+  ReconList <- MeshRecon(CrimeObsPts.df_inCity,MeshNode_raw,MeshTri,KDEgrd,iterMax=iterMax,Estimation="ML",reltol=reltol,eps=eps)
+  Recon.city <- ReconList$Recon.city
+  MeshNode <- ReconList$MeshNode
+  Recon.city$DENVAL <- Recon.city$VALUE/sum(Recon.city$VALUE) 
+  NumNode[i] <- nrow(MeshNode)
+  err_sigma <- sqrt(MSE(KDE.Hist_inCity$DENVAL,Recon.city$DENVAL)) 
+  Mesh.ML_PSNR[i] <- PSNR(KDE.Hist_inCity$DENVAL,err_sigma^2) 
+  Mesh.ML_repErr[i] <- err_sigma/sqrt(MSE(KDE.Hist_inCity$DENVAL,0)) 
+  
+  # Pixel
+  Recon.city <- PixRecon(CrimeObsPts.df_full,PixGrd,KDEgrd.full,iterMax=iterMax,Estimation="ML",interpMethod='linear',
+                         reltol=reltol,eps=eps)
+  Recon.city <- Recon.city[isInCity2,]
+  Recon.city$DENVAL <- Recon.city$VALUE/sum(Recon.city$VALUE)
+  err_sigma <- sqrt(MSE(KDE.Hist_inCity$DENVAL,Recon.city$DENVAL))
+  Pix.ML_PSNR[i] <- PSNR(KDE.Hist_inCity$DENVAL,err_sigma^2) 
+  Pix.ML_repErr[i] <- err_sigma/sqrt(MSE(KDE.Hist_inCity$DENVAL,0)) 
+
+  ## MAP
+  for (j in 1:length(SmParamSet)){
+    # Mesh
+    ReconList <- MeshRecon(CrimeObsPts.df_inCity,MeshNode_raw,MeshTri,KDEgrd,iterMax=iterMax,Estimation="MAP",SmoothParam=SmParamSet[j])
+    Recon.city <- ReconList$Recon.city
+    MeshNode <- ReconList$MeshNode
+    if (any(is.na(Recon.city$VALUE))){
+      # MAP-EM alogrithm may yield negative estimates which violates Poisson assumption
+      Mesh.MAP_PSNR[i,j] <- NA
+      Mesh.MAP_repErr[i,j] <- NA
+    }else{
+      Recon.city$DENVAL <- Recon.city$VALUE/sum(Recon.city$VALUE)  
+      err_sigma <- sqrt(MSE(KDE.Hist_inCity$DENVAL,Recon.city$DENVAL)) 
+      Mesh.MAP_PSNR[i,j] <- PSNR(KDE.Hist_inCity$DENVAL,err_sigma^2) 
+      Mesh.MAP_repErr[i,j] <- err_sigma/sqrt(MSE(KDE.Hist_inCity$DENVAL,0)) 
+    }
+
+    # Pixel
+    Recon.city <- PixRecon(CrimeObsPts.df_full,PixGrd,KDEgrd.full,iterMax=iterMax,Estimation="MAP",SmoothParam=SmParamSet[j],
+                           Raster=PixRaster,type="rook",interpMethod='linear',reltol=reltol,eps=eps)
+    Recon.city <- Recon.city[isInCity2,]
+    if (any(is.na(Recon.city$VALUE))){
+      # MAP-EM alogrithm may yield negative estimates which violates Poisson assumption
+      Mesh.MAP_PSNR[i,j] <- NA
+      Mesh.MAP_repErr[i,j] <- NA
+    }else{
+      Recon.city$DENVAL <- Recon.city$VALUE/sum(Recon.city$VALUE)
+      err_sigma <- sqrt(MSE(KDE.Hist_inCity$DENVAL,Recon.city$DENVAL))
+      Pix.MAP_PSNR[i,j] <- PSNR(KDE.Hist_inCity$DENVAL,err_sigma^2) 
+      Pix.MAP_repErr[i,j] <- err_sigma/sqrt(MSE(KDE.Hist_inCity$DENVAL,0)) 
+    }
+
+  }
+}
+```
+
+```{r plot-results,echo=FALSE, message=FALSE, warning=FALSE, fig.width=7,fig.height=4, fig.align='center', eval=TRUE,cache=TRUE}
+source("PlotRecon_mesh_pix.R")
+```
